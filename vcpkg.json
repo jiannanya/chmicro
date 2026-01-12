@@ -1,0 +1,11 @@
+{
+  "name": "chmicro",
+  "version-string": "0.1.0",
+  "description": "Lightweight high-performance C++20 microservice framework (HTTP + async runtime)",
+  "license": "MIT",
+  "dependencies": [
+    "boost-asio",
+    "boost-beast",
+    "boost-system"
+  ]
+}

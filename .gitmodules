@@ -1,0 +1,9 @@
+[submodule "another/chlog"]
+	path = another/chlog
+	url = https://github.com/jiannanya/chlog.git
+[submodule "another/chtest"]
+	path = another/chtest
+	url = https://github.com/jiannanya/chtest.git
+[submodule "another/chjson"]
+	path = another/chjson
+	url = https://github.com/jiannanya/chjson.git
