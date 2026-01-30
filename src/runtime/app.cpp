@@ -18,6 +18,48 @@ namespace {
 std::atomic<App*> g_app{nullptr};
 
 #ifdef _WIN32
+BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType);
+#endif
+
+struct ScopedAppRegistration {
+    explicit ScopedAppRegistration(App* app) : app_(app) {
+        App* expected = nullptr;
+        if (!g_app.compare_exchange_strong(expected, app_, std::memory_order_acq_rel)) {
+            // Another App is already registered. Keep the existing one and continue.
+            // This framework currently expects a single active App.
+            app_ = nullptr;
+            return;
+        }
+
+#ifdef _WIN32
+        if (SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE)) {
+            handler_installed_ = true;
+        }
+#endif
+    }
+
+    ~ScopedAppRegistration() {
+#ifdef _WIN32
+        if (handler_installed_) {
+            SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
+        }
+#endif
+
+        if (app_ != nullptr) {
+            App* expected = app_;
+            (void)g_app.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+        }
+    }
+
+    ScopedAppRegistration(const ScopedAppRegistration&) = delete;
+    ScopedAppRegistration& operator=(const ScopedAppRegistration&) = delete;
+
+private:
+    App* app_{nullptr};
+    bool handler_installed_{false};
+};
+
+#ifdef _WIN32
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
         if (auto* app = g_app.load(std::memory_order_acquire)) {
@@ -64,10 +106,15 @@ void App::AddServer(std::shared_ptr<IHttpServer> server) {
 }
 
 int App::Run() {
-    g_app.store(this, std::memory_order_release);
-#ifdef _WIN32
-    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-#else
+    ScopedAppRegistration reg(this);
+
+    {
+        std::lock_guard<std::mutex> lk(stop_mu_);
+        stopped_ = false;
+    }
+    stop_requested_.store(false, std::memory_order_release);
+
+#ifndef _WIN32
     // POSIX: stop the app on Ctrl+C / SIGTERM.
     // Keep the signal_set alive by capturing it.
     auto signals = std::make_shared<boost::asio::signal_set>(io_.Next(), SIGINT, SIGTERM);
@@ -82,20 +129,10 @@ int App::Run() {
         s->Start();
     }
 
-    // Block until Stop() stops the io contexts.
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        // Once all contexts are stopped, we consider it finished.
-        // (We don't expose a running flag; Stop() will stop contexts.)
-        // If one context is still running, Next() could still be usable.
-        bool any_running = false;
-        // contexts_ not accessible here; infer by attempting post? keep simple.
-        // We'll just rely on Stop() breaking by stopping threads; this loop exits when Stop() called.
-        // A small shared flag would be cleaner, but keep minimal.
-        if (!g_app.load(std::memory_order_acquire)) {
-            break;
-        }
-        (void)any_running;
+    // Block until Stop() completes.
+    {
+        std::unique_lock<std::mutex> lk(stop_mu_);
+        stop_cv_.wait(lk, [&] { return stopped_; });
     }
 
     return 0;
@@ -103,9 +140,11 @@ int App::Run() {
 
 void App::Stop() {
     // idempotent
-    if (g_app.exchange(nullptr, std::memory_order_acq_rel) != this) {
+    if (stop_requested_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+
+    g_app.store(nullptr, std::memory_order_release);
 
     chmicro::log::info("Stopping app...");
     for (auto& s : servers_) {
@@ -113,6 +152,12 @@ void App::Stop() {
     }
     io_.Stop();
     chmicro::log::info("Stopped.");
+
+    {
+        std::lock_guard<std::mutex> lk(stop_mu_);
+        stopped_ = true;
+    }
+    stop_cv_.notify_all();
 }
 
 } // namespace chmicro

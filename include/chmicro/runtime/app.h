@@ -1,7 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,6 +46,11 @@ private:
     AppOptions options_;
     IoContextPool io_;
     std::vector<std::shared_ptr<IHttpServer>> servers_;
+
+    std::atomic<bool> stop_requested_{false};
+    std::mutex stop_mu_;
+    std::condition_variable stop_cv_;
+    bool stopped_{false};
 };
 
 } // namespace chmicro
